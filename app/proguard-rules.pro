@@ -1,0 +1,6 @@
+-keep class com.micmax.pdf.** { *; }
+-keepattributes SourceFile, LineNumberTable
+-dontobfuscate
+-dontwarn com.gemalto.jp2.**
+-keep class com.tom_roush.pdfbox.** { *; }
+-keep class com.tom_roush.fontbox.** { *; }
