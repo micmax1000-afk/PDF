@@ -9,6 +9,7 @@ App Android per lavorare sui PDF senza internet e senza AI: tutto resta sul tele
 - **Scansiona** un foglio (bordi, raddrizzamento e filtri con lo scanner di Google), anche più pagine in un PDF
 - **Comprimi** (per email/WhatsApp), **proteggi con password**, apri PDF con password, **copia il testo**
 - Ogni modifica crea un **nuovo PDF**: l'originale non viene toccato
+- **Tema** chiaro, scuro o come il telefono (🎨 in alto nella home)
 - «Apri con» e «Condividi» da altre app; «Con l'AI» manda il PDF a Web Launcher
 
 ## Costruzione

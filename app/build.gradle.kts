@@ -13,7 +13,7 @@ android {
         targetSdk = 34
         // Su GitHub il numero di build cresce a ogni compilazione (1000 + numero dell'esecuzione)
         versionCode = System.getenv("PDF_VERSION_CODE")?.toIntOrNull() ?: 1
-        versionName = "1.0.0"
+        versionName = "1.1.0"
         resourceConfigurations += listOf("it", "en")
     }
 
