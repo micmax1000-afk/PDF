@@ -17,6 +17,7 @@ import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.content.FileProvider
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
@@ -124,7 +125,21 @@ class MainActivity : AppCompatActivity() {
         return root
     }
 
+    /** Tema: 0 come il telefono, 1 chiaro, 2 scuro. */
+    fun themeChoice() = getSharedPreferences("pdf", MODE_PRIVATE).getInt("theme", 0)
+    private fun themeMode() = when (themeChoice()) { 1 -> AppCompatDelegate.MODE_NIGHT_NO; 2 -> AppCompatDelegate.MODE_NIGHT_YES; else -> AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM }
+    fun setThemeChoice(v: Int) {
+        getSharedPreferences("pdf", MODE_PRIVATE).edit().putInt("theme", v).apply()
+        AppCompatDelegate.setDefaultNightMode(themeMode())
+        recreate()
+    }
+    private fun themeDialog() {
+        val names = arrayOf("Come il telefono", "Chiaro", "Scuro")
+        MaterialAlertDialogBuilder(this).setTitle("🎨 Tema").setSingleChoiceItems(names, themeChoice()) { dl, w -> dl.dismiss(); setThemeChoice(w) }.show()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
+        AppCompatDelegate.setDefaultNightMode(themeMode())
         super.onCreate(savedInstanceState)
         PdfEdit.init(this)
         host = FrameLayout(this).apply { setBackgroundColor(col(R.color.bg)) }
@@ -141,7 +156,7 @@ class MainActivity : AppCompatActivity() {
     // ---------- home ----------
     private fun buildHome(): View {
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(col(R.color.bg)) }
-        root.addView(header("PDF e fogli", null, null, back = false))
+        root.addView(header("PDF e fogli", "🎨", { themeDialog() }, back = false))
         homeBody = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), dp(4), dp(12), dp(24)) }
         root.addView(ScrollView(this).apply { addView(homeBody) }, LinearLayout.LayoutParams(-1, 0, 1f))
         refreshHome()
