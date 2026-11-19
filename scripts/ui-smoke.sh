@@ -21,17 +21,17 @@ start
 shot 01-home 6
 alive || { echo "::error::L'app si e' chiusa all'avvio"; why; exit 1; }
 
-# motore: firma, evidenzia, pagine, comprimi, password, sblocco
+# motore: firma, evidenzia, pagine, comprimi, password, sblocco, oscura, numeri e filigrana
 start --es action selftest
 for i in $(seq 1 30); do sleep 2; adb logcat -d -s PDF_SELFTEST:* | grep -q 'PDFEDIT_' && break; done
 PE=$(adb logcat -d -s PDF_SELFTEST:* | grep -o 'PDFEDIT_.*' | tail -1)
 echo "Motore PDF: $PE"
 case "$PE" in
-  PDFEDIT_OK*password=true*sblocco=true*compressa=2*) ;;
+  PDFEDIT_OK*password=true*sblocco=true*compressa=2*oscura=true*decora=true*) ;;
   *) echo "::error::Il motore dei PDF non funziona ($PE)"; adb logcat -d -s AndroidRuntime:E | tail -30; exit 1;;
 esac
 
-for a in viewer editor pages split; do
+for a in viewer editor pages split mydata; do
   start --es action $a
   shot "02-$a" 7
   alive || { echo "::error::L'app si e' chiusa nella schermata $a"; why; exit 1; }

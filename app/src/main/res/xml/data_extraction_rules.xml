@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12 e successivi: niente backup nel cloud (i PDF, la firma e i tuoi dati restano sul telefono).
+     Il passaggio diretto a un telefono nuovo (cavo o Wi-Fi vicino) resta possibile. -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="root" />
+        <exclude domain="file" />
+        <exclude domain="database" />
+        <exclude domain="sharedpref" />
+        <exclude domain="external" />
+    </cloud-backup>
+</data-extraction-rules>
