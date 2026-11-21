@@ -4,6 +4,7 @@ App Android per lavorare sui PDF senza internet e senza AI: tutto resta sul tele
 
 **Leggere**
 - **Apri e leggi** un PDF: zoom con due dita o doppio tocco (le pagine si ridisegnano nitide), **riprende dall'ultima pagina letta**, tocca il numero di pagina per **andare alla pagina** che vuoi
+- **Seleziona il testo**: tieni premuto sulla pagina (o «✂ Seleziona testo») e trascina il dito sulle parole; poi copia, condividi o evidenzia proprio quelle righe
 - **Cerca** una parola dentro il PDF o in tutti i PDF (accenti e maiuscole non contano: «perche» trova «perché»)
 - **📖 Indice** dei capitoli (quando il PDF lo ha) e **🔖 segnalibri** tuoi
 - **🔊 Leggi ad alta voce** con la voce del telefono, **🌙 lettura notturna**

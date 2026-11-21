@@ -200,12 +200,12 @@ class DrawLayer(c: Context) : View(c) {
 
 /** [mode]: "sign", "highlight", "redact", "text", "note" say what to start with. */
 @SuppressLint("ClickableViewAccessibility")
-fun MainActivity.openEditor(doc: Store.Doc, mode: String, startPage: Int = 0) {
+fun MainActivity.openEditor(doc: Store.Doc, mode: String, startPage: Int = 0, initial: List<EditItem> = emptyList()) {
     val file = doc.file(this)
     val total = PdfEdit.pageCount(file)
     if (total == 0) { toast("Non riesco a leggere questo PDF"); return }
     val ratios = PdfEdit.ratios(file)
-    val items = mutableListOf<EditItem>()
+    val items = initial.toMutableList()
     var save: () -> Unit = {}
     openScreen("Firma, scrivi, segna", "Salva", { save() }, dirty = { items.isNotEmpty() }) { body ->
         val undo = ArrayDeque<List<EditItem>>(); val redo = ArrayDeque<List<EditItem>>()

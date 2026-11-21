@@ -31,7 +31,7 @@ case "$PE" in
   *) echo "::error::Il motore dei PDF non funziona ($PE)"; adb logcat -d -s AndroidRuntime:E | tail -30; exit 1;;
 esac
 
-for a in viewer editor pages split mydata; do
+for a in viewer editor pages split mydata select; do
   start --es action $a
   shot "02-$a" 7
   alive || { echo "::error::L'app si e' chiusa nella schermata $a"; why; exit 1; }
@@ -47,6 +47,11 @@ SR=$(adb logcat -d -s PDF_SELFTEST:* | grep -o 'SEARCH=[0-9]*' | tail -1)
 echo "Ricerca: $SR"
 [ "$SR" = "SEARCH=3" ] || [ "$SR" = "SEARCH=9" ] || { echo "::error::La ricerca nel PDF non trova il testo ($SR)"; exit 1; }
 shot 03-ricerca 3
+
+# selezione del testo: le parole della pagina di prova con la loro posizione
+WD=$(adb logcat -d -s PDF_SELFTEST:* | grep -o 'WORDS=[0-9]*' | tail -1)
+echo "Selezione: $WD"
+[ "${WD#WORDS=}" -ge 20 ] 2>/dev/null || { echo "::error::Non trovo le parole da selezionare ($WD)"; exit 1; }
 
 # tocchi casuali
 adb shell monkey -p $PKG --throttle 150 --ignore-timeouts --pct-syskeys 0 --pct-appswitch 0 -s 42 300 >"$OUT/monkey.txt" 2>&1

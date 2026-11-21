@@ -103,8 +103,16 @@ class ZoomRecycler(c: Context) : RecyclerView(c) {
         override fun onScale(d: ScaleGestureDetector): Boolean { setZoom(zoom * d.scaleFactor, d.focusX); return true }
         override fun onScaleEnd(d: ScaleGestureDetector) { onZoomed?.invoke(zoom) }
     })
+    /** A long press on a page: page and where, as fractions of the page (0..1 from the top left). */
+    var onLongPage: ((page: Int, fx: Float, fy: Float) -> Unit)? = null
     private val taps = GestureDetector(c, object : GestureDetector.SimpleOnGestureListener() {
         override fun onDoubleTap(e: MotionEvent): Boolean { setZoom(if (zoom > 1.2f) 1f else 2.5f, e.x); onZoomed?.invoke(zoom); return true }
+        override fun onLongPress(e: MotionEvent) {
+            val x = (e.x - tx) / zoom; val y = e.y / zoom
+            val child = findChildViewUnder(x, y) ?: return
+            val pos = getChildAdapterPosition(child).takeIf { it >= 0 } ?: return
+            onLongPage?.invoke(pos, ((x - child.left) / child.width).coerceIn(0f, 1f), ((y - child.top) / child.height).coerceIn(0f, 1f))
+        }
     })
 
     private fun setZoom(z: Float, fx: Float) {

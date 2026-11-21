@@ -405,6 +405,42 @@ object PdfEdit {
         load(file).use { d -> PDFTextStripper().apply { sortByPosition = true; startPage = page + 1; endPage = page + 1 }.getText(d) }
     }.getOrDefault("").replace(Regex("-\\n(?=\\p{Ll})"), "").replace(Regex("\\s+"), " ").trim()
 
+    /**
+     * The words of one page (0-based) and where they are, as fractions of the page as shown (rotation applied),
+     * in reading order; empty for a scan.
+     */
+    fun words(c: Context, file: File, page: Int): List<Word> = runCatching {
+        init(c)
+        load(file).use { d ->
+            val pg = d.getPage(page)
+            val (dw, dh) = shownSize(pg)
+            val out = ArrayList<Word>()
+            var line = 0
+            val st = object : PDFTextStripper() {
+                override fun writeString(text: String?, pos: MutableList<com.tom_roush.pdfbox.text.TextPosition>?) {
+                    val cur = ArrayList<com.tom_roush.pdfbox.text.TextPosition>()
+                    fun flush() {
+                        if (cur.isEmpty()) return
+                        val t = cur.joinToString("") { it.unicode.orEmpty() }.trim()
+                        if (t.isNotEmpty()) {
+                            val l = cur.minOf { it.x }; val r = cur.maxOf { it.x + it.widthDirAdj }
+                            val h = cur.maxOf { maxOf(it.heightDir, it.fontSizeInPt * 0.75f, 2f) }
+                            val base = cur.maxOf { it.y }
+                            out += Word(t, l / dw, (base - h) / dh, (r - l).coerceAtLeast(1f) / dw, (h * 1.25f) / dh, line)
+                        }
+                        cur.clear()
+                    }
+                    pos?.forEach { tp -> if (tp.unicode.isNullOrBlank()) flush() else cur += tp }
+                    flush()
+                }
+                override fun writeLineSeparator() { line++ }
+            }
+            st.sortByPosition = true; st.startPage = page + 1; st.endPage = page + 1
+            st.getText(d)
+            out
+        }
+    }.getOrDefault(emptyList())
+
     /** The pages as JPEG pictures [width] pixels wide, in [dir]; the files in order. */
     fun toImages(file: File, pages: List<Int>, dir: File, baseName: String, width: Int = 1600): List<File> {
         dir.mkdirs()

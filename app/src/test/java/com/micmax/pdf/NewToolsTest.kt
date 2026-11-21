@@ -87,3 +87,32 @@ class NewToolsTest {
         assertEquals(listOf("Breve."), ReadAloud.chunks("Breve."))
     }
 }
+
+class SelectTest {
+    private val words = listOf(
+        Word("Il", 0.10f, 0.10f, 0.03f, 0.02f, 0), Word("canone", 0.14f, 0.10f, 0.10f, 0.02f, 0), Word("mensile", 0.25f, 0.10f, 0.11f, 0.02f, 0),
+        Word("è", 0.10f, 0.14f, 0.02f, 0.02f, 1), Word("650", 0.13f, 0.14f, 0.05f, 0.02f, 1)
+    )
+
+    @Test fun textKeepsLines() {
+        assertEquals("canone mensile\nè 650", TextSel.text(words, 1, 4))
+        assertEquals("canone mensile\nè 650", TextSel.text(words, 4, 1))
+        assertEquals("Il", TextSel.text(words, 0, 0))
+        assertEquals("", TextSel.text(emptyList(), 0, 3))
+    }
+
+    @Test fun oneBoxPerLine() {
+        val b = TextSel.lineBoxes(words, 1, 4)
+        assertEquals(2, b.size)
+        assertEquals(0.14f, b[0][0], 0.001f); assertEquals(0.36f - 0.14f, b[0][2], 0.001f)
+        assertEquals(0.10f, b[1][0], 0.001f); assertEquals(0.18f - 0.10f, b[1][2], 0.001f)
+    }
+
+    @Test fun wordUnderTheFinger() {
+        assertEquals(1, TextSel.at(words, 0.18f, 0.11f, 0.7f))
+        assertEquals(4, TextSel.at(words, 0.16f, 0.15f, 0.7f))
+        assertEquals(2, TextSel.at(words, 0.40f, 0.11f, 0.7f))
+        assertEquals(-1, TextSel.at(words, 0.9f, 0.9f, 0.7f, 0.05f))
+        assertEquals(-1, TextSel.at(emptyList(), 0.5f, 0.5f, 0.7f))
+    }
+}

@@ -477,6 +477,7 @@ class MainActivity : AppCompatActivity() {
         fun applyNight() { rv.setBackgroundColor(if (adapter.night) 0xFF22252B.toInt() else 0xFF8A93A6.toInt()) }
         adapter.night = prefs().getBoolean("night", false); applyNight()
         rv.adapter = adapter
+        rv.onLongPage = { p, fx, fy -> rv.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS); openSelect(doc, p, fx, fy) }
         rv.onZoomed = { z -> val s = z > 1.4f; if (s && !adapter.sharp) { adapter.sharp = true; rv.refreshVisible() } else if (!s) adapter.sharp = false }
         fun cur() = rv.currentPage()
         fun updateCounter() { counter.text = "${cur() + 1} / ${pr.count}" + if (cur() in Store.marks(this, doc)) " 🔖" else "" }
@@ -495,6 +496,7 @@ class MainActivity : AppCompatActivity() {
         val reader = ReadAloud(this, file, pr.count) { p -> go(p) }
         root.addView(chipBar(listOf(
             "🔍 Cerca" to { searchInDoc(doc) { go(it) } },
+            "✂ Seleziona testo" to { openSelect(doc, cur()) },
             "📖 Indice" to { showIndex(doc) { go(it) } },
             "🔖 Segnalibro" to { val on = Store.toggleMark(this, doc, cur()); updateCounter(); toast(if (on) "🔖 Segnalibro sulla pagina ${cur() + 1}" else "Segnalibro tolto") },
             "🔊 Leggi" to { if (reader.active) { reader.stop(); toast("Lettura fermata") } else { toast("Leggo da pagina ${cur() + 1} · tocca di nuovo «🔊 Leggi» per fermare"); reader.start(cur()) } },
@@ -630,6 +632,7 @@ class MainActivity : AppCompatActivity() {
                     "pages" -> openPages(d, false)
                     "split" -> openPages(d, true)
                     "mydata" -> openMyData()
+                    "select" -> { openSelect(d, 0, 0.1f, 0.12f); io.execute { android.util.Log.i("PDF_SELFTEST", "WORDS=" + PdfEdit.words(this, d.file(this), 0).size) } }
                     "search" -> { openViewer(d); io.execute { android.util.Log.i("PDF_SELFTEST", "SEARCH=" + PdfEdit.search(this, d.file(this), "canone").size) } }
                     else -> {}
                 }
