@@ -13,7 +13,7 @@ android {
         targetSdk = 34
         // Su GitHub il numero di build cresce a ogni compilazione (1000 + numero dell'esecuzione)
         versionCode = System.getenv("PDF_VERSION_CODE")?.toIntOrNull() ?: 1
-        versionName = "1.1.1"
+        versionName = "1.2.0"
         resourceConfigurations += listOf("it", "en")
     }
 
@@ -58,6 +58,7 @@ dependencies {
     implementation("com.google.android.material:material:1.11.0")
     implementation("androidx.recyclerview:recyclerview:1.3.2")
     implementation("androidx.activity:activity-ktx:1.8.2")
+    implementation("androidx.biometric:biometric:1.1.0")                 // blocco con impronta o PIN del telefono
     implementation("com.tom-roush:pdfbox-android:2.0.27.0")   // firma, compila, evidenzia, pagine, comprimi, password
     implementation("com.google.android.gms:play-services-mlkit-document-scanner:16.0.0-beta1")
     testImplementation("junit:junit:4.13.2")

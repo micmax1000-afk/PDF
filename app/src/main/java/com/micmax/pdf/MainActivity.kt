@@ -6,6 +6,7 @@ import android.os.Bundle
 import android.text.InputType
 import android.view.Gravity
 import android.view.View
+import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -18,6 +19,9 @@ import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDelegate
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
@@ -27,8 +31,15 @@ import java.util.concurrent.Executors
 class MainActivity : AppCompatActivity() {
     val io = Executors.newSingleThreadExecutor()
     private lateinit var host: FrameLayout
-    private val stack = ArrayList<Pair<View, (() -> Unit)?>>()
-    private lateinit var homeBody: LinearLayout
+    private lateinit var lockView: View
+
+    /** A screen on the stack: its view, what to do when it closes, and whether it holds work not saved yet. */
+    private class Screen(val view: View, val onClose: (() -> Unit)?, val dirty: (() -> Boolean)?)
+    private val stack = ArrayList<Screen>()
+    private lateinit var homeList: LinearLayout
+    private var homeQuery = ""
+
+    private fun prefs() = getSharedPreferences("pdf", MODE_PRIVATE)
 
     // ---------- selettori e fotocamera ----------
     private var pdfCb: ((List<Uri>) -> Unit)? = null
@@ -39,9 +50,9 @@ class MainActivity : AppCompatActivity() {
         runCatching { if (multi) pdfMany.launch(arrayOf("application/pdf")) else pdfOne.launch(arrayOf("application/pdf")) }.onFailure { toast("Non riesco ad aprire i file") }
     }
 
-    private var imageCb: ((Uri) -> Unit)? = null
-    private val imageOne = registerForActivityResult(ActivityResultContracts.GetContent()) { u -> if (u != null) imageCb?.invoke(u) }
-    fun pickImage(cb: (Uri) -> Unit) { imageCb = cb; runCatching { imageOne.launch("image/*") }.onFailure { toast("Non riesco ad aprire la galleria") } }
+    private var imagesCb: ((List<Uri>) -> Unit)? = null
+    private val imagesMany = registerForActivityResult(ActivityResultContracts.GetMultipleContents()) { l -> if (l.isNotEmpty()) imagesCb?.invoke(l) }
+    fun pickImages(cb: (List<Uri>) -> Unit) { imagesCb = cb; runCatching { imagesMany.launch("image/*") }.onFailure { toast("Non riesco ad aprire la galleria") } }
 
     private var photoCb: ((Boolean) -> Unit)? = null
     private val photoOne = registerForActivityResult(ActivityResultContracts.TakePicture()) { ok -> photoCb?.invoke(ok) }
@@ -64,10 +75,9 @@ class MainActivity : AppCompatActivity() {
         val res = com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult.fromActivityResultIntent(r.data) ?: return@registerForActivityResult
         val uri = res.pdf?.uri ?: return@registerForActivityResult
         io.execute {
-            val tmp = File(cacheDir, "scan_${System.currentTimeMillis()}.pdf")
-            val ok = runCatching { contentResolver.openInputStream(uri)!!.use { i -> tmp.outputStream().use { i.copyTo(it) } } }.isSuccess
+            val tmp = copyIn(uri, "scan", ".pdf")
             runOnUiThread {
-                if (!ok) { toast("Scansione non salvata"); return@runOnUiThread }
+                if (tmp == null) { toast("Scansione non salvata"); return@runOnUiThread }
                 val name = "Scansione " + java.text.SimpleDateFormat("d MMM HH.mm", java.util.Locale.ITALIAN).format(java.util.Date())
                 io.execute { val d = Store.add(this, tmp, name); runOnUiThread { refreshHome(); openViewer(d) } }
             }
@@ -89,15 +99,21 @@ class MainActivity : AppCompatActivity() {
     // ---------- schermate ----------
     fun toast(m: String) = Toast.makeText(this, m, Toast.LENGTH_SHORT).show()
 
-    fun push(v: View, onClose: (() -> Unit)? = null) {
-        stack += v to onClose
+    fun push(v: View, onClose: (() -> Unit)? = null, dirty: (() -> Boolean)? = null) {
+        stack += Screen(v, onClose, dirty)
         host.removeAllViews(); host.addView(v, FrameLayout.LayoutParams(-1, -1))
     }
 
-    fun pop() {
+    /** Back to the screen before. If this one has work not saved, asks first (unless [force]). */
+    fun pop(force: Boolean = false) {
         if (stack.size <= 1) return
-        stack.removeLast().second?.invoke()
-        host.removeAllViews(); host.addView(stack.last().first, FrameLayout.LayoutParams(-1, -1))
+        if (!force && stack.last().dirty?.invoke() == true) {
+            MaterialAlertDialogBuilder(this).setTitle("Uscire senza salvare?").setMessage("Quello che hai fatto qui andrà perso. Per tenerlo, tocca «Salva».")
+                .setPositiveButton("Esci senza salvare") { _, _ -> pop(force = true) }.setNegativeButton("Resta", null).show()
+            return
+        }
+        stack.removeAt(stack.lastIndex).onClose?.invoke()
+        host.removeAllViews(); host.addView(stack.last().view, FrameLayout.LayoutParams(-1, -1))
         if (stack.size == 1) refreshHome()
     }
 
@@ -114,22 +130,28 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
-    /** Una pagina con titolo e freccia indietro; il contenuto sta in [build]. */
-    fun openScreen(title: String, action: String? = null, onAction: (() -> Unit)? = null, build: (LinearLayout) -> Unit): View {
+    /**
+     * Una pagina con titolo e freccia indietro; il contenuto sta in [build]. [dirty] says when there is work not saved
+     * (going back then asks first); with [scroll] = false the body fills the screen (for lists that scroll on their own).
+     */
+    fun openScreen(title: String, action: String? = null, onAction: (() -> Unit)? = null, dirty: (() -> Boolean)? = null, scroll: Boolean = true, build: (LinearLayout) -> Unit): View {
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(col(R.color.bg)) }
         root.addView(header(title, action, onAction))
-        val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), dp(4), dp(12), dp(24)) }
-        root.addView(ScrollView(this).apply { addView(body) }, LinearLayout.LayoutParams(-1, 0, 1f))
+        val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), dp(4), dp(12), if (scroll) dp(24) else 0) }
+        if (scroll) root.addView(ScrollView(this).apply { addView(body) }, LinearLayout.LayoutParams(-1, 0, 1f))
+        else root.addView(body, LinearLayout.LayoutParams(-1, 0, 1f))
         build(body)
-        push(root)
+        push(root, null, dirty)
         return root
     }
 
+    // ---------- impostazioni: tema, i miei dati, blocco ----------
+
     /** Tema: 0 come il telefono, 1 chiaro, 2 scuro. */
-    fun themeChoice() = getSharedPreferences("pdf", MODE_PRIVATE).getInt("theme", 0)
+    fun themeChoice() = prefs().getInt("theme", 0)
     private fun themeMode() = when (themeChoice()) { 1 -> AppCompatDelegate.MODE_NIGHT_NO; 2 -> AppCompatDelegate.MODE_NIGHT_YES; else -> AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM }
     fun setThemeChoice(v: Int) {
-        getSharedPreferences("pdf", MODE_PRIVATE).edit().putInt("theme", v).apply()
+        prefs().edit().putInt("theme", v).apply()
         AppCompatDelegate.setDefaultNightMode(themeMode())
         recreate()
     }
@@ -138,12 +160,76 @@ class MainActivity : AppCompatActivity() {
         MaterialAlertDialogBuilder(this).setTitle("🎨 Tema").setSingleChoiceItems(names, themeChoice()) { dl, w -> dl.dismiss(); setThemeChoice(w) }.show()
     }
 
+    private fun settings() {
+        val lock = lockOn()
+        MaterialAlertDialogBuilder(this).setTitle("⚙ Impostazioni").setItems(arrayOf(
+            "🎨 Tema (chiaro, scuro, come il telefono)",
+            "👤 I miei dati (per i moduli)",
+            if (lock) "🔒 Blocco con impronta o PIN: attivo (tocca per toglierlo)" else "🔓 Blocco con impronta o PIN: spento (tocca per attivarlo)"
+        )) { _, w ->
+            when (w) {
+                0 -> themeDialog()
+                1 -> openMyData()
+                2 -> if (lock) authenticate("Togli il blocco") { setLock(false); toast("Blocco tolto") } else enableLock()
+            }
+        }.show()
+    }
+
+    private val authenticators = BiometricManager.Authenticators.BIOMETRIC_WEAK or BiometricManager.Authenticators.DEVICE_CREDENTIAL
+    private fun lockOn() = prefs().getBoolean("lock", false)
+    private fun setLock(on: Boolean) {
+        prefs().edit().putBoolean("lock", on).apply()
+        if (on) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE) else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+    }
+    private fun enableLock() {
+        if (BiometricManager.from(this).canAuthenticate(authenticators) != BiometricManager.BIOMETRIC_SUCCESS) {
+            MaterialAlertDialogBuilder(this).setTitle("🔒 Blocco").setMessage("Prima imposta un blocco schermo sul telefono (PIN, segno o impronta): l'app usa quello.").setPositiveButton("Ok", null).show()
+            return
+        }
+        authenticate("Attiva il blocco") {
+            setLock(true); unlocked = true
+            toast("✓ Da ora l'app chiede l'impronta o il PIN quando la riapri")
+        }
+    }
+
+    private fun authenticate(title: String, ok: () -> Unit) {
+        val prompt = BiometricPrompt(this, ContextCompat.getMainExecutor(this), object : BiometricPrompt.AuthenticationCallback() {
+            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) { ok() }
+            override fun onAuthenticationError(code: Int, msg: CharSequence) {
+                if (code != BiometricPrompt.ERROR_USER_CANCELED && code != BiometricPrompt.ERROR_CANCELED) toast(msg.toString())
+            }
+        })
+        runCatching { prompt.authenticate(BiometricPrompt.PromptInfo.Builder().setTitle(title).setSubtitle("PDF e fogli").setAllowedAuthenticators(authenticators).build()) }
+            .onFailure { toast("Non riesco a chiedere l'impronta o il PIN") }
+    }
+
+    private fun showLockIfNeeded() {
+        val need = lockOn() && (!unlocked || System.currentTimeMillis() - leftAt > 60_000)
+        if (!need) { lockView.visibility = View.GONE; return }
+        unlocked = false
+        lockView.visibility = View.VISIBLE
+        lockView.post { authenticate("Sblocca") { unlocked = true; lockView.visibility = View.GONE } }
+    }
+
+    private fun buildLockView() = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setBackgroundColor(col(R.color.bg)); isClickable = true; visibility = View.GONE
+        addView(TextView(this@MainActivity).apply { text = "🔒"; textSize = 56f; gravity = Gravity.CENTER })
+        addView(TextView(this@MainActivity).apply { text = "PDF e fogli è bloccato"; textSize = 18f; gravity = Gravity.CENTER; setTextColor(col(R.color.text)); setPadding(0, dp(12), 0, dp(20)) })
+        addView(primaryButton("Sblocca") { authenticate("Sblocca") { unlocked = true; visibility = View.GONE } }.apply { layoutParams = LinearLayout.LayoutParams(dp(220), -2) })
+    }
+
+    override fun onStart() { super.onStart(); showLockIfNeeded() }
+    override fun onStop() { super.onStop(); if (unlocked) leftAt = System.currentTimeMillis() }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         AppCompatDelegate.setDefaultNightMode(themeMode())
         super.onCreate(savedInstanceState)
         PdfEdit.init(this)
+        if (lockOn()) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         host = FrameLayout(this).apply { setBackgroundColor(col(R.color.bg)) }
-        setContentView(host)
+        lockView = buildLockView()
+        setContentView(FrameLayout(this).apply { addView(host, FrameLayout.LayoutParams(-1, -1)); addView(lockView, FrameLayout.LayoutParams(-1, -1)) })
+        if (savedInstanceState == null) io.execute { cleanCache() }
         push(buildHome())
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() { if (stack.size > 1) pop() else finish() }
@@ -151,20 +237,23 @@ class MainActivity : AppCompatActivity() {
         handleIntent(intent)
     }
 
+    override fun onDestroy() { super.onDestroy(); stack.forEach { runCatching { it.onClose?.invoke() } } }
+
     override fun onNewIntent(intent: Intent?) { super.onNewIntent(intent); handleIntent(intent) }
+
+    /** Files left behind by earlier work (copies, shares, photos): gone after half an hour. */
+    private fun cleanCache() {
+        val old = System.currentTimeMillis() - 30 * 60_000
+        cacheDir.listFiles()?.filter { it.isFile && it.lastModified() < old }?.forEach { it.delete() }
+        File(cacheDir, "share").walkBottomUp().filter { it.lastModified() < old && it != File(cacheDir, "share") }.forEach { it.delete() }
+    }
 
     // ---------- home ----------
     private fun buildHome(): View {
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(col(R.color.bg)) }
-        root.addView(header("PDF e fogli", "🎨", { themeDialog() }, back = false))
-        homeBody = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), dp(4), dp(12), dp(24)) }
-        root.addView(ScrollView(this).apply { addView(homeBody) }, LinearLayout.LayoutParams(-1, 0, 1f))
-        refreshHome()
-        return root
-    }
-
-    fun refreshHome() {
-        homeBody.removeAllViews()
+        root.addView(header("PDF e fogli", "⚙", { settings() }, back = false))
+        val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), dp(4), dp(12), dp(24)) }
+        root.addView(ScrollView(this).apply { addView(body) }, LinearLayout.LayoutParams(-1, 0, 1f))
         val grid = android.widget.GridLayout(this).apply { columnCount = 2 }
         fun cell(v: View) = grid.addView(v, android.widget.GridLayout.LayoutParams().apply {
             width = 0; columnSpec = android.widget.GridLayout.spec(android.widget.GridLayout.UNDEFINED, 1f); setMargins(dp(4), dp(4), dp(4), dp(4))
@@ -172,35 +261,77 @@ class MainActivity : AppCompatActivity() {
         cell(bigButton("📂", "Apri un PDF", true) { pickPdf(false) { importUri(it.first()) { d -> openViewer(d) } } })
         cell(bigButton("📷", "Scansiona", true) { scan() })
         cell(bigButton("✍️", "Firma", false) { pickPdf(false) { importUri(it.first()) { d -> openEditor(d, "sign") } } })
+        cell(bigButton("📝", "Compila", false) { pickPdf(false) { importUri(it.first()) { d -> openFillForm(d) } } })
+        cell(bigButton("🖼", "Foto in PDF", false) { pickImages { photosToPdf(it) } })
         cell(bigButton("📑", "Unisci / Dividi", false) {
             MaterialAlertDialogBuilder(this).setItems(arrayOf("➕ Unisci più PDF in uno", "✂️ Dividi un PDF (tieni solo alcune pagine)")) { _, w ->
                 if (w == 0) pickPdf(true) { mergePdfs(it) } else pickPdf(false) { importUri(it.first()) { d -> openPages(d, true) } }
             }.show()
         })
-        homeBody.addView(grid)
+        body.addView(grid)
         val search = EditText(this).apply {
-            hint = "🔍 Cerca in tutti i miei PDF…"; setSingleLine(); imeOptions = EditorInfo.IME_ACTION_SEARCH; inputType = InputType.TYPE_CLASS_TEXT
+            hint = "🔍 Cerca per nome · invio: cerca nel testo"; setSingleLine(); imeOptions = EditorInfo.IME_ACTION_SEARCH; inputType = InputType.TYPE_CLASS_TEXT
             background = roundBg(col(R.color.card), 14, col(R.color.stroke)); setPadding(dp(14), dp(12), dp(14), dp(12)); setTextColor(col(R.color.text))
             setOnEditorActionListener { v, a, _ -> if (a == EditorInfo.IME_ACTION_SEARCH) { searchAll(v.text.toString()); true } else false }
+            addTextChangedListener(object : android.text.TextWatcher {
+                override fun afterTextChanged(s: android.text.Editable?) { homeQuery = s.toString(); refreshHome() }
+                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            })
         }
-        homeBody.addView(search, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
-        val docs = Store.list(this)
-        sectionLabel(homeBody, "RECENTI")
-        if (docs.isEmpty()) hintLabel(homeBody, "Qui compaiono i PDF che apri, scansioni o modifichi. Ogni modifica crea un PDF nuovo: l'originale non viene toccato.")
-        docs.forEach { d ->
-            listRow(homeBody, "📑", d.name, Store.sub(d), { docMenu(d) }) { openViewer(d) }
+        body.addView(search, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+        homeList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        body.addView(homeList)
+        refreshHome()
+        return root
+    }
+
+    private val sortNames = listOf("Recenti", "Nome", "Più grandi")
+    private fun sort() = prefs().getInt("sort", Store.SORT_RECENT)
+
+    fun refreshHome() {
+        if (!::homeList.isInitialized) return
+        homeList.removeAllViews()
+        val all = Store.list(this)
+        val shown = Store.arrange(all, homeQuery, sort())
+        val favs = if (homeQuery.isBlank()) shown.filter { it.fav } else emptyList()
+        if (favs.isNotEmpty()) {
+            sectionLabel(homeList, "⭐ PREFERITI")
+            favs.forEach { d -> listRow(homeList, "⭐", d.name, Store.sub(d), { docMenu(d) }) { openViewer(d) } }
         }
+        val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        homeList.addView(head)
+        sectionLabel(head, if (homeQuery.isBlank()) "I MIEI PDF" else "TROVATI: ${shown.size}")
+        (head.getChildAt(0).layoutParams as LinearLayout.LayoutParams).apply { width = 0; weight = 1f }
+        if (all.size > 1) head.addView(TextView(this).apply {
+            text = "Ordina: ${sortNames[sort()]} ▾"; textSize = 12.5f; setTextColor(col(R.color.accent)); setPadding(dp(8), dp(14), dp(6), dp(4))
+            setOnClickListener {
+                MaterialAlertDialogBuilder(this@MainActivity).setTitle("Ordina").setSingleChoiceItems(sortNames.toTypedArray(), sort()) { dl, w ->
+                    prefs().edit().putInt("sort", w).apply(); dl.dismiss(); refreshHome()
+                }.show()
+            }
+        })
+        when {
+            all.isEmpty() -> hintLabel(homeList, "Qui compaiono i PDF che apri, scansioni o modifichi. Ogni modifica crea un PDF nuovo: l'originale non viene toccato.")
+            shown.isEmpty() -> hintLabel(homeList, "Nessun PDF con «${homeQuery.trim()}» nel nome. Premi invio sulla tastiera per cercarlo dentro i PDF.")
+        }
+        shown.filter { homeQuery.isNotBlank() || !it.fav }.forEach { d ->
+            listRow(homeList, if (d.fav) "⭐" else "📑", d.name, Store.sub(d), { docMenu(d) }) { openViewer(d) }
+        }
+        if (homeQuery.isBlank() && all.size > 1) hintLabel(homeList, "Tieni premuto un PDF per rinominarlo, metterlo tra i preferiti, stamparlo o toglierlo.")
     }
 
     private fun docMenu(d: Store.Doc) {
-        MaterialAlertDialogBuilder(this).setTitle(d.name).setItems(arrayOf("Apri", "Rinomina", "Condividi", "Salva nei file", "Togli dall'elenco")) { _, w ->
+        MaterialAlertDialogBuilder(this).setTitle(d.name).setItems(arrayOf("Apri", if (d.fav) "☆ Togli dai preferiti" else "⭐ Metti tra i preferiti", "Rinomina", "Condividi", "🖨 Stampa", "Salva nei file", "Togli dall'elenco")) { _, w ->
             when (w) {
                 0 -> openViewer(d)
-                1 -> { val et = EditText(this).apply { setText(d.name); setSelectAllOnFocus(true); setPadding(dp(20), dp(14), dp(20), dp(14)) }
+                1 -> { Store.setFav(this, d, !d.fav); refreshHome() }
+                2 -> { val et = EditText(this).apply { setText(d.name); setSelectAllOnFocus(true); setPadding(dp(20), dp(14), dp(20), dp(14)) }
                     MaterialAlertDialogBuilder(this).setTitle("Nome").setView(et).setPositiveButton("Salva") { _, _ -> Store.rename(this, d, et.text.toString()); refreshHome() }.setNegativeButton("Annulla", null).show() }
-                2 -> sharePdf(d)
-                3 -> saveAs(d)
-                4 -> MaterialAlertDialogBuilder(this).setTitle("Toglierlo dall'elenco?").setMessage("La copia dentro l'app viene eliminata. Il file originale, se c'è, non cambia.")
+                3 -> sharePdf(d)
+                4 -> printPdf(d)
+                5 -> saveAs(d)
+                6 -> MaterialAlertDialogBuilder(this).setTitle("Toglierlo dall'elenco?").setMessage("La copia dentro l'app viene eliminata. Il file originale, se c'è, non cambia.")
                     .setPositiveButton("Togli") { _, _ -> Store.remove(this, d); refreshHome() }.setNegativeButton("Annulla", null).show()
             }
         }.show()
@@ -208,14 +339,14 @@ class MainActivity : AppCompatActivity() {
 
     private fun searchAll(q: String) {
         if (q.trim().length < 2) { toast("Scrivi almeno due lettere"); return }
-        toast("Cerco…")
+        toast("Cerco dentro i PDF…")
         io.execute {
-            val found = ArrayList<Triple<Store.Doc, PdfEdit.Hit, Int>>()
-            for (d in Store.list(this)) PdfEdit.search(this, d.file(this), q, 4).forEach { found += Triple(d, it, 0) }
+            val found = ArrayList<Pair<Store.Doc, PdfEdit.Hit>>()
+            for (d in Store.list(this)) PdfEdit.search(this, d.file(this), q, 4).forEach { found += d to it }
             runOnUiThread {
-                if (found.isEmpty()) { toast("Non trovo «$q» nei tuoi PDF (le scansioni non hanno testo da cercare)"); return@runOnUiThread }
-                MaterialAlertDialogBuilder(this).setTitle("«$q» · ${found.size} risultati")
-                    .setItems(found.take(40).map { (d, h, _) -> "${d.name} · pag. ${h.page + 1}\n${h.snippet}" }.toTypedArray()) { _, w -> found[w].let { (d, h, _) -> openViewer(d, h.page) } }
+                if (found.isEmpty()) { toast("Non trovo «${q.trim()}» nei tuoi PDF (le scansioni non hanno testo da cercare)"); return@runOnUiThread }
+                MaterialAlertDialogBuilder(this).setTitle("«${q.trim()}» · ${found.size} risultati")
+                    .setItems(found.take(40).map { (d, h) -> "${d.name} · pag. ${h.page + 1}\n${h.snippet}" }.toTypedArray()) { _, w -> found[w].let { (d, h) -> openViewer(d, h.page) } }
                     .setNegativeButton("Chiudi", null).show()
             }
         }
@@ -230,14 +361,13 @@ class MainActivity : AppCompatActivity() {
     fun importUri(uri: Uri, then: (Store.Doc) -> Unit) {
         toast("Apro il PDF…")
         io.execute {
-            val tmp = File(cacheDir, "in_${System.currentTimeMillis()}.pdf")
             val name = displayName(uri)
-            val ok = runCatching { contentResolver.openInputStream(uri)!!.use { i -> tmp.outputStream().use { i.copyTo(it) } } }.isSuccess
-            val st = if (ok) PdfEdit.checkStrict(tmp) else PdfEdit.BAD
+            val tmp = copyIn(uri, "in", ".pdf")
+            val st = if (tmp != null) PdfEdit.checkStrict(tmp) else PdfEdit.BAD
             runOnUiThread {
                 when (st) {
-                    PdfEdit.OK -> io.execute { val d = Store.add(this, tmp, name); runOnUiThread { refreshHome(); then(d) } }
-                    PdfEdit.PASSWORD -> askPassword(tmp, name, then)
+                    PdfEdit.OK -> io.execute { val d = Store.add(this, tmp!!, name); runOnUiThread { refreshHome(); then(d) } }
+                    PdfEdit.PASSWORD -> askPassword(tmp!!, name, then)
                     else -> toast("Non riesco ad aprire questo file come PDF")
                 }
             }
@@ -251,7 +381,7 @@ class MainActivity : AppCompatActivity() {
                 io.execute {
                     val out = File(cacheDir, "unlocked_${System.currentTimeMillis()}.pdf")
                     val ok = PdfEdit.unlock(this, tmp, out, et.text.toString()) && PdfEdit.checkStrict(out) == PdfEdit.OK
-                    if (ok) { val d = Store.add(this, out, name); runOnUiThread { refreshHome(); then(d) } }
+                    if (ok) { tmp.delete(); val d = Store.add(this, out, name); runOnUiThread { refreshHome(); then(d) } }
                     else runOnUiThread { toast("Password sbagliata"); askPassword(tmp, name, then) }
                 }
             }.setNegativeButton("Annulla") { _, _ -> tmp.delete() }.show()
@@ -263,7 +393,7 @@ class MainActivity : AppCompatActivity() {
         io.execute {
             val doc = Store.add(this, tmp, "$baseName ($suffix)")
             runOnUiThread {
-                if (closeTop) pop()
+                if (closeTop) pop(force = true)
                 refreshHome()
                 MaterialAlertDialogBuilder(this).setTitle("✓ PDF pronto")
                     .setMessage("«${doc.name}» · ${doc.pages} ${if (doc.pages == 1) "pagina" else "pagine"} · ${Store.size(doc.size)}\nL'originale non è stato toccato.")
@@ -285,43 +415,130 @@ class MainActivity : AppCompatActivity() {
         }.onFailure { toast(if (onlyPackage != null) "Web Launcher non è installato su questo telefono" else "Non riesco a condividere il PDF") }
     }
 
+    /** Stampa con la stampa di Android (stampanti di casa, Wi-Fi, «Salva come PDF»). */
+    fun printPdf(doc: Store.Doc) {
+        val file = doc.file(this)
+        val pm = getSystemService(PRINT_SERVICE) as android.print.PrintManager
+        runCatching {
+            pm.print(doc.name, object : android.print.PrintDocumentAdapter() {
+                override fun onLayout(old: android.print.PrintAttributes?, new: android.print.PrintAttributes?, cancel: android.os.CancellationSignal?, cb: LayoutResultCallback, extras: Bundle?) {
+                    if (cancel?.isCanceled == true) { cb.onLayoutCancelled(); return }
+                    cb.onLayoutFinished(android.print.PrintDocumentInfo.Builder(Store.fileName(doc.name)).setContentType(android.print.PrintDocumentInfo.CONTENT_TYPE_DOCUMENT)
+                        .setPageCount(if (doc.pages > 0) doc.pages else android.print.PrintDocumentInfo.PAGE_COUNT_UNKNOWN).build(), true)
+                }
+                override fun onWrite(pages: Array<out android.print.PageRange>?, dest: android.os.ParcelFileDescriptor, cancel: android.os.CancellationSignal?, cb: WriteResultCallback) {
+                    runCatching { file.inputStream().use { i -> java.io.FileOutputStream(dest.fileDescriptor).use { i.copyTo(it) } } }
+                        .onSuccess { cb.onWriteFinished(arrayOf(android.print.PageRange.ALL_PAGES)) }
+                        .onFailure { cb.onWriteFailed(it.message) }
+                }
+            }, null)
+        }.onFailure { toast("La stampa non è disponibile su questo telefono") }
+    }
+
+    /** Le pagine come foto JPG, da mandare su WhatsApp o salvare. */
+    private fun shareAsImages(doc: Store.Doc, current: Int) {
+        val choices = if (doc.pages > 1) arrayOf("Solo questa pagina (${current + 1})", "Tutte le pagine (${doc.pages})") else arrayOf("La pagina")
+        MaterialAlertDialogBuilder(this).setTitle("🖼 PDF in foto").setItems(choices) { _, w ->
+            val pages = if (w == 0) listOf(current) else (0 until doc.pages).toList()
+            toast("Preparo ${pages.size} ${if (pages.size == 1) "foto" else "foto"}…")
+            io.execute {
+                val dir = File(File(cacheDir, "share"), "foto_${System.currentTimeMillis()}")
+                val files = PdfEdit.toImages(doc.file(this), pages, dir, Store.cleanName(doc.name))
+                runOnUiThread {
+                    if (files.isEmpty()) { toast("Non riesco a fare le foto"); return@runOnUiThread }
+                    runCatching {
+                        val uris = ArrayList(files.map { FileProvider.getUriForFile(this, "$packageName.files", it) })
+                        val i = if (uris.size == 1) Intent(Intent.ACTION_SEND).apply { putExtra(Intent.EXTRA_STREAM, uris[0]) }
+                            else Intent(Intent.ACTION_SEND_MULTIPLE).apply { putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris) }
+                        i.type = "image/jpeg"; i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        i.clipData = android.content.ClipData.newRawUri("", uris[0]).apply { uris.drop(1).forEach { addItem(android.content.ClipData.Item(it)) } }
+                        startActivity(Intent.createChooser(i, "Manda le foto"))
+                    }.onFailure { toast("Non riesco a condividere le foto") }
+                }
+            }
+        }.setNegativeButton("Annulla", null).show()
+    }
+
     // ---------- il PDF ----------
-    fun openViewer(doc: Store.Doc, page: Int = 0) {
+    /** Apre il PDF; senza [page] riprende dall'ultima pagina letta. */
+    fun openViewer(doc: Store.Doc, page: Int = -1) {
         val file = doc.file(this)
         val pr = runCatching { PageRenderer(file) }.getOrNull() ?: run { toast("Non riesco ad aprire questo PDF"); return }
+        val startAt = if (page >= 0) page else Store.lastPage(this, doc).coerceIn(0, (pr.count - 1).coerceAtLeast(0))
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(col(R.color.bg)) }
         val head = header(doc.name, null, null)
-        val counter = TextView(this).apply { textSize = 13f; setTextColor(col(R.color.muted)); setPadding(dp(8), 0, 0, 0) }
+        val counter = TextView(this).apply { textSize = 13f; setTextColor(col(R.color.accent)); setPadding(dp(8), dp(6), 0, dp(6)); contentDescription = "Vai alla pagina" }
         head.addView(counter)
         root.addView(head)
         val rv = ZoomRecycler(this).apply {
-            layoutManager = LinearLayoutManager(this@MainActivity); setBackgroundColor(0xFF8A93A6.toInt()); setPadding(dp(6), dp(6), dp(6), dp(6)); clipToPadding = false
+            layoutManager = LinearLayoutManager(this@MainActivity); setPadding(dp(6), dp(6), dp(6), dp(6)); clipToPadding = false; itemAnimator = null
         }
-        rv.adapter = PageAdapter(pr) { rv.width - dp(12) }
-        fun updateCounter() { counter.text = "${rv.currentPage() + 1} / ${pr.count}" }
+        val adapter = PageAdapter(pr) { rv.width - dp(12) }
+        fun applyNight() { rv.setBackgroundColor(if (adapter.night) 0xFF22252B.toInt() else 0xFF8A93A6.toInt()) }
+        adapter.night = prefs().getBoolean("night", false); applyNight()
+        rv.adapter = adapter
+        rv.onLongPage = { p, fx, fy -> rv.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS); openSelect(doc, p, fx, fy) }
+        rv.onZoomed = { z -> val s = z > 1.4f; if (s && !adapter.sharp) { adapter.sharp = true; rv.refreshVisible() } else if (!s) adapter.sharp = false }
+        fun cur() = rv.currentPage()
+        fun updateCounter() { counter.text = "${cur() + 1} / ${pr.count}" + if (cur() in Store.marks(this, doc)) " 🔖" else "" }
         rv.addOnScrollListener(object : androidx.recyclerview.widget.RecyclerView.OnScrollListener() {
             override fun onScrolled(r: androidx.recyclerview.widget.RecyclerView, dx: Int, dy: Int) = updateCounter()
+            override fun onScrollStateChanged(r: androidx.recyclerview.widget.RecyclerView, st: Int) { if (st == androidx.recyclerview.widget.RecyclerView.SCROLL_STATE_IDLE) Store.setLastPage(this@MainActivity, doc, cur()) }
         })
-        fun cur() = rv.currentPage()
+        fun go(p: Int) { rv.goToPage(p); rv.post { updateCounter() } }
+        counter.setOnClickListener {
+            val et = EditText(this).apply { hint = "1 – ${pr.count}"; inputType = InputType.TYPE_CLASS_NUMBER; setPadding(dp(20), dp(14), dp(20), dp(14)) }
+            MaterialAlertDialogBuilder(this).setTitle("Vai alla pagina").setView(et).setPositiveButton("Vai") { _, _ ->
+                val n = et.text.toString().toIntOrNull()
+                if (n == null || n < 1 || n > pr.count) toast("Scrivi un numero da 1 a ${pr.count}") else go(n - 1)
+            }.setNegativeButton("Annulla", null).show()
+        }
+        val reader = ReadAloud(this, file, pr.count) { p -> go(p) }
         root.addView(chipBar(listOf(
-            "🔍 Cerca" to { searchInDoc(doc) { rv.goToPage(it) } },
+            "🔍 Cerca" to { searchInDoc(doc) { go(it) } },
+            "✂ Seleziona testo" to { openSelect(doc, cur()) },
+            "📖 Indice" to { showIndex(doc) { go(it) } },
+            "🔖 Segnalibro" to { val on = Store.toggleMark(this, doc, cur()); updateCounter(); toast(if (on) "🔖 Segnalibro sulla pagina ${cur() + 1}" else "Segnalibro tolto") },
+            "🔊 Leggi" to { if (reader.active) { reader.stop(); toast("Lettura fermata") } else { toast("Leggo da pagina ${cur() + 1} · tocca di nuovo «🔊 Leggi» per fermare"); reader.start(cur()) } },
+            "🌙 Notte" to { adapter.night = !adapter.night; prefs().edit().putBoolean("night", adapter.night).apply(); applyNight(); adapter.notifyDataSetChanged() },
             "✍️ Firma" to { openEditor(doc, "sign", cur()) },
             "🖍 Evidenzia" to { openEditor(doc, "highlight", cur()) },
             "🔤 Testo" to { openEditor(doc, "text", cur()) },
             "📌 Nota" to { openEditor(doc, "note", cur()) },
+            "⬛ Oscura" to { openEditor(doc, "redact", cur()) },
             "📝 Compila" to { openFillForm(doc) },
             "📑 Pagine" to { openPages(doc, false) },
             "✂️ Dividi" to { openPages(doc, true) },
             "🗜 Comprimi" to { compressDoc(doc) },
             "🔒 Password" to { protectDoc(doc) },
+            "🖨 Stampa" to { printPdf(doc) },
+            "🖼 In foto" to { shareAsImages(doc, cur()) },
             "📋 Copia testo" to { copyText(doc) },
             "📤 Condividi" to { sharePdf(doc) },
             "✨ Con l'AI" to { aiHelp(doc) },
             "💾 Salva nei file" to { saveAs(doc) }
         )))
         root.addView(rv, LinearLayout.LayoutParams(-1, 0, 1f))
-        push(root) { pr.close() }
-        rv.post { updateCounter(); if (page > 0) { rv.goToPage(page); updateCounter() } }
+        push(root, { Store.setLastPage(this, doc, cur()); reader.shutdown(); pr.close() })
+        rv.post {
+            updateCounter()
+            if (startAt > 0) { go(startAt); if (page < 0) toast("Riprendo da pagina ${startAt + 1}") }
+        }
+    }
+
+    /** Segnalibri e capitoli del PDF. */
+    private fun showIndex(doc: Store.Doc, go: (Int) -> Unit) {
+        io.execute {
+            val chapters = PdfEdit.outline(this, doc.file(this))
+            runOnUiThread {
+                val entries = Store.marks(this, doc).map { "🔖 Pagina ${it + 1}" to it } + chapters.map { (t, p) -> "$t · pag. ${p + 1}" to p }
+                if (entries.isEmpty()) {
+                    MaterialAlertDialogBuilder(this).setTitle("📖 Indice").setMessage("Questo PDF non ha un indice dei capitoli. Puoi mettere i tuoi segnalibri con «🔖 Segnalibro» sulla pagina che vuoi ritrovare.").setPositiveButton("Ok", null).show()
+                    return@runOnUiThread
+                }
+                MaterialAlertDialogBuilder(this).setTitle("📖 Indice e segnalibri").setItems(entries.map { it.first }.toTypedArray()) { _, w -> go(entries[w].second) }.setNegativeButton("Chiudi", null).show()
+            }
+        }
     }
 
     private fun searchInDoc(doc: Store.Doc, go: (Int) -> Unit) {
@@ -414,10 +631,18 @@ class MainActivity : AppCompatActivity() {
                     "editor" -> openEditor(d, "highlight")
                     "pages" -> openPages(d, false)
                     "split" -> openPages(d, true)
+                    "mydata" -> openMyData()
+                    "select" -> { openSelect(d, 0, 0.1f, 0.12f); io.execute { android.util.Log.i("PDF_SELFTEST", "WORDS=" + PdfEdit.words(this, d.file(this), 0).size) } }
                     "search" -> { openViewer(d); io.execute { android.util.Log.i("PDF_SELFTEST", "SEARCH=" + PdfEdit.search(this, d.file(this), "canone").size) } }
                     else -> {}
                 }
             }
         }
+    }
+
+    companion object {
+        /** Unlocked in this run of the app (kept when the screen is rebuilt, e.g. after changing theme). */
+        @JvmStatic var unlocked = false
+        @JvmStatic var leftAt = 0L
     }
 }
